@@ -19,6 +19,7 @@ import {
   Volume2
 } from 'lucide-react'
 import { effectiveResolution, fitDuration, getImageModel, getVideoModel } from '@shared/higgsfield'
+import { getFlowVideoModel, isFlowModel } from '@shared/flow'
 import { CAMERA_PRESETS, MOTION_STRENGTHS, cameraAt, cameraCss } from '@shared/motion'
 import { needsVisual } from '@shared/script'
 import { geminiVoiceName, geminiVoiceTone } from '@shared/models'
@@ -339,7 +340,7 @@ function ClipPanel({ clip, index, total }: { clip: Clip; index: number; total: n
             {(
               [
                 { id: 'camera', title: 'Gerak kamera', sub: 'Gratis · dirender di komputer', icon: <Move className="size-[22px]" />, subCls: 'text-ok-ink' },
-                { id: 'video', title: 'Video AI', sub: 'Higgsfield · pakai kredit', icon: <Film className="size-[22px]" />, subCls: 'text-ink-2' }
+                { id: 'video', title: 'Video AI', sub: isFlowModel(project.videoModel) ? 'Google Flow · pakai paket AI' : 'Higgsfield · pakai kredit', icon: <Film className="size-[22px]" />, subCls: 'text-ink-2' }
               ] as const
             ).map((o) => {
               const on = clip.motionType === o.id
@@ -525,11 +526,17 @@ export function StoryboardStep() {
     !narration.running
   const makeVideos = async (): Promise<void> => {
     const n = stats.needVideo.length
+    const vmFlow = isFlowModel(project!.videoModel)
+    const vmName = vmFlow ? getFlowVideoModel(project!.videoModel).name : getVideoModel(project!.videoModel).name
     const ok = await confirmDialog({
       title: `Jadikan ${n} klip video AI?`,
       body:
-        `Setiap gambar klip dianimasikan dengan ${getVideoModel(project!.videoModel).name}, panjangnya mengikuti suara narasi klip itu.` +
-        (videoCredits != null ? ` Perkiraan biaya ${Math.round(videoCredits * 10) / 10} kredit Higgsfield.` : '') +
+        `Setiap gambar klip dianimasikan dengan ${vmName}, panjangnya mengikuti suara narasi klip itu.` +
+        (vmFlow
+          ? ' Memakai kredit langganan Google AI kamu — pastikan gflow-openai serve menyala di komputer ini.'
+          : videoCredits != null
+            ? ` Perkiraan biaya ${Math.round(videoCredits * 10) / 10} kredit Higgsfield.`
+            : '') +
         ' Klip yang sudah punya video tidak dibuat ulang.',
       confirm: `Buat ${n} video`
     })

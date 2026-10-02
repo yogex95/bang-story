@@ -14,9 +14,11 @@ import {
   KeyRound,
   Mic,
   SlidersHorizontal,
-  Trash2
+  Trash2,
+  TriangleAlert
 } from 'lucide-react'
 import { HF_IMAGE_MODELS, HF_VIDEO_MODELS } from '@shared/higgsfield'
+import { FLOW_IMAGE_MODELS, FLOW_VIDEO_MODELS } from '@shared/flow'
 import { LANGUAGES, LLM_PROVIDERS } from '@shared/models'
 import type { ApiProvider, AppSettings, KeyStatus, KeyTestResult, LlmProvider, TtsProvider } from '@shared/types'
 import { Logo } from '../components/Logo'
@@ -548,6 +550,64 @@ function HiggsfieldSection({ status, onChanged }: { status?: KeyStatus; onChange
   )
 }
 
+function FlowSection({ status, onChanged }: { status?: KeyStatus; onChanged: () => void }) {
+  return (
+    <>
+      <SectionTitle icon={<ImageIcon className="size-5" />} title="Google Flow (tidak resmi)" sub="Pakai kredit langganan Google AI Pro/Ultra lewat jembatan gflow di komputer ini." />
+      <Card>
+        <div className="flex items-center gap-3">
+          <ProviderLogo id="flow" />
+          <div className="flex flex-1 flex-col">
+            <span className="text-base font-bold">Google Flow</span>
+            <span className="text-[13px] text-ink-2">Veo dan Imagen dari langganan Google AI kamu, via gflow-openai serve</span>
+          </div>
+          <StatusBadge status={status} />
+        </div>
+        <KeyForm
+          provider="flow"
+          name="gflow-openai serve"
+          label="API key gflow-openai serve"
+          status={status}
+          placeholder="Samakan dengan GFLOW_OPENAI_API_KEY"
+          hint={
+            <>
+              Kunci ini <strong className="text-ink">kamu yang tentukan sendiri</strong>. Caranya:
+              <ol className="mt-1.5 list-decimal space-y-1 pl-5">
+                <li>
+                  Pasang <code className="rounded bg-sand px-1 font-mono text-xs">gflow</code> dari repo haizhuflow2api (tombol “Buka repo gflow” di bawah), lalu{' '}
+                  <code className="rounded bg-sand px-1 font-mono text-xs">gflow auth login --profile server --browser chrome</code> dengan akun
+                  Google yang punya langganan AI Pro/Ultra.
+                </li>
+                <li>
+                  Jalankan{' '}
+                  <code className="rounded bg-sand px-1 font-mono text-xs">
+                    GFLOW_OPENAI_API_KEY=kunci-rahasia-kamu gflow-openai serve --host 127.0.0.1 --port 8000
+                  </code>{' '}
+                  dan biarkan menyala selama memakai Bang Story.
+                </li>
+                <li>Tempel kunci yang sama persis di sini, lalu tes koneksi.</li>
+              </ol>
+            </>
+          }
+          help="Tes koneksi memeriksa server lokal dan status login gflow, tanpa memakai kredit."
+          link="https://github.com/liuhaizhu996/haizhuflow2api"
+          linkLabel="Buka repo gflow"
+          onChanged={onChanged}
+        />
+        <p className="flex items-start gap-2.5 border-t border-dashed border-line pt-4 text-[13px] leading-relaxed text-ink-2">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0" />
+          <span>
+            Ini <strong className="text-ink">jembatan tidak resmi</strong> (reverse-engineer API privat Flow): Google bisa mengubahnya kapan saja dan
+            integrasinya bisa rusak mendadak. Butuh Chrome asli dan login akun Google di komputer ini. Semua{' '}
+            {FLOW_IMAGE_MODELS.length} model gambar dan {FLOW_VIDEO_MODELS.length} model video di atas memakai kredit langganan Flow kamu — modelnya
+            dipilih per proyek di langkah <strong className="text-ink">Ide cerita</strong>, bagian Model AI.
+          </span>
+        </p>
+      </Card>
+    </>
+  )
+}
+
 export function Settings() {
   const { go, route } = useApp()
   const back = route.name === 'settings' && route.back ? route.back : ({ name: 'home' } as const)
@@ -618,6 +678,7 @@ export function Settings() {
                 <LlmSection settings={settings} statusOf={statusOf} onChanged={reload} onSettings={setSettings} />
                 <TtsSection settings={settings} statusOf={statusOf} onChanged={reload} onSettings={setSettings} />
                 <HiggsfieldSection status={statusOf('higgsfield')} onChanged={reload} />
+                <FlowSection status={statusOf('flow')} onChanged={reload} />
                 <WhisperSection settings={settings} onSettings={setSettings} />
               </>
             )}

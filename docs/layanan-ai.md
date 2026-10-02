@@ -19,6 +19,7 @@ Pengguna memasukkan kuncinya sendiri di **Pengaturan › Layanan AI dan kunci**.
 | Penyedia (`ApiProvider`) | Dipakai untuk |
 |---|---|
 | `higgsfield` | gambar, lembar karakter, video |
+| `flow` | gambar dan video via jembatan lokal `gflow-openai serve` (kredit langganan Google AI) |
 | `gemini` | LLM (naskah/visual) dan Gemini TTS |
 | `elevenlabs` | TTS |
 | `openrouter`, `groq`, `custom` | LLM lewat API kompatibel OpenAI |
@@ -82,6 +83,35 @@ di API Higgsfield (hanya di aplikasi webnya). Satu entri:
   (`https://docs.higgsfield.ai/docs/llms.txt`), lalu pastikan `imageBody`/`videoBody` tidak melempar error
   "butuh <field>" (`checkRequired`). Ikon keluarga model diatur di `components/ModelLogo.tsx`.
 - Model bawaan: `DEFAULT_IMAGE_MODEL` dan `DEFAULT_VIDEO_MODEL` di `shared/higgsfield.ts`.
+
+## Google Flow (tidak resmi) (`services/flow-bridge.ts`, `shared/flow.ts`)
+
+Bang Story bicara ke server lokal `gflow-openai serve` (repo
+[haizhuflow2api](https://github.com/liuhaizhu996/haizhuflow2api)) di `http://127.0.0.1:8000`
+(bisa dioverride lewat env `STUDIO_FLOW_BASE`), yang meneruskan ke API privat Flow memakai sesi login
+Chrome milik pengguna. Kredit yang terpotong adalah langganan Google AI Pro/Ultra pengguna.
+
+- **Auth**: `Authorization: Bearer <kunci>` — kunci ini buatan pengguna sendiri
+  (`GFLOW_OPENAI_API_KEY` saat menjalankan server), disimpan seperti kunci lain di `secrets`
+  (provider `flow`). Endpoint `/health/live` dan `/health/ready` tidak butuh auth.
+- **Gambar**: `POST /v1/images/generations` `{prompt, model, size, response_format: 'b64_json'}` —
+  sinkron, mengembalikan base64 PNG. Model: `image4`, `nano2`, `nano-pro` (alias OpenAI `gpt-image-1*`
+  juga diterima server).
+- **Video**: `POST /v1/videos` multipart (`prompt`, `model`, `seconds`, `size`, `quality`,
+  `input_reference` = file gambar klip) → `{id}`; polling `GET /v1/videos/{id}` sampai `completed`;
+  unduh `GET /v1/videos/{id}/content`. Durasi valid 4/6/8 (10 hanya `omni-flash`); `fitFlowDuration`
+  memilih yang terdekat. Server memakai satu `generation_lock`, jadi antrean `flow` dibatasi 2.
+- **Batal**: `DELETE /v1/videos/{id}` hanya untuk job yang sudah selesai (409 kalau masih jalan), jadi
+  `cancelVideo` best-effort — sinyal abort menghentikan polling di sisi kita, generate di sisi server
+  biasanya terus jalan.
+- **Estimasi**: tidak ada endpoint estimate; `estimateCredits` mengembalikan `null` untuk model
+  `flow/*`, dan UI menampilkan teks langganan sebagai gantinya (jangan memalsukan angka).
+- **Resume**: job video Flow bisa dilanjutkan setelah restart (server menyimpan job-nya);
+  job gambar Flow tidak (sinkron).
+- **Katalog**: `shared/flow.ts`, id ber-namespace `flow/...` supaya `isFlowModel(id)` bisa membedakan
+  dari katalog Higgsfield. `generation.ts` memilih jalur via `mediaProvider(modelId)`; hasil disimpan
+  lewat `storeMediaAsset` yang dipakai bersama Higgsfield (provider tercatat `flow` di tabel aset).
+- Panduan pengguna: [google-flow-gflow.md](google-flow-gflow.md).
 
 ## Whisper lokal (`src/main/whisper.ts`)
 

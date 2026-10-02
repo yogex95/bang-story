@@ -52,6 +52,7 @@ import { probeDurationMs, probeSize } from './services/audio'
 import * as eleven from './services/elevenlabs'
 import * as gemini from './services/gemini'
 import * as hf from './services/higgsfield'
+import * as flowBridge from './services/flow-bridge'
 import * as llm from './services/llm'
 import { generateScript, generateVisuals, generateMusicPrompt } from './story'
 
@@ -71,6 +72,7 @@ function handle(channel: string, fn: Handler): void {
 
 async function testProvider(provider: ApiProvider, key?: string): Promise<KeyTestResult> {
   if (provider === 'higgsfield') return hf.testCredentials(key)
+  if (provider === 'flow') return flowBridge.testCredentials(key)
   if (provider === 'elevenlabs') return eleven.testKey(key)
   return llm.testLlm(provider, key)
 }

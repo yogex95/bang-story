@@ -3,7 +3,8 @@ import { mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { estimateWordTimings } from '@shared/captions'
 import { stripVoiceTags } from '@shared/speech'
-import { getImageModel, getVideoModel, imageBody, maxRefs, promptLimit, videoBody, type HfModel } from '@shared/higgsfield'
+import { getImageModel, getVideoModel, imageBody, maxRefs, promptLimit, videoBody, NO_MUSIC, type HfModel } from '@shared/higgsfield'
+import { fitFlowDuration, flowSize, getFlowImageModel, getFlowVideoModel, isFlowModel } from '@shared/flow'
 import { getStyle } from '@shared/styles'
 import type { AspectRatio, Asset, Character, Clip, CreditEstimate, Job, Project, WordTiming } from '@shared/types'
 import { getDb } from './db'
@@ -33,9 +34,16 @@ import { probeDurationMs, probeSize } from './services/audio'
 import * as eleven from './services/elevenlabs'
 import * as gemini from './services/gemini'
 import * as hf from './services/higgsfield'
+import * as flowBridge from './services/flow-bridge'
+import type { FlowVideoStatus } from './services/flow-bridge'
 import { downloadTo, sleep } from './services/http'
 
 const DAY = 24 * 60 * 60 * 1000
+
+/** 'flow' when the model id belongs to the Flow catalog, otherwise 'higgsfield'. */
+function mediaProvider(modelId: string | null | undefined): 'higgsfield' | 'flow' {
+  return isFlowModel(modelId) ? 'flow' : 'higgsfield'
+}
 
 function extFromType(contentType: string, url: string, fallback: string): string {
   if (/png/.test(contentType)) return '.png'
@@ -168,6 +176,58 @@ interface HfPayload {
   prompt: string
 }
 
+/** Stores downloaded bytes as an asset and wires it to the clip/character, for both providers. */
+async function storeMediaAsset(opts: {
+  job: Job
+  bytes: Buffer
+  ext: string
+  kind: 'image' | 'video'
+  provider: 'higgsfield' | 'flow'
+  model: string
+  prompt: string
+  remoteId?: string
+  remoteUrl?: string
+  target: HfPayload['target']
+}): Promise<string> {
+  const { job, target } = opts
+  const rel = saveFile(job.projectId, opts.kind === 'video' ? 'videos' : 'images', opts.ext, opts.bytes)
+  const abs = assetAbsPath(job.projectId, rel)
+  const size = await probeSize(abs)
+  const durationMs = opts.kind === 'video' ? await probeDurationMs(abs).catch(() => null) : null
+  const asset = insertAsset({
+    projectId: job.projectId,
+    clipId: job.clipId,
+    characterId: job.characterId,
+    kind: opts.kind,
+    provider: opts.provider,
+    model: opts.model,
+    prompt: opts.prompt,
+    remoteId: opts.remoteId,
+    remoteUrl: opts.remoteUrl,
+    localPath: rel,
+    durationMs,
+    width: size?.width ?? null,
+    height: size?.height ?? null
+  })
+  emit.asset(asset)
+  if (target === 'sheet' && job.characterId) {
+    setCharacterSheet(job.characterId, asset.id)
+    emit.character({ characterId: job.characterId, patch: { sheetAssetId: asset.id } })
+  } else if (target === 'clip-image' && job.clipId) {
+    patchClip(job.clipId, { imageAssetId: asset.id })
+    emit.clip({ clipId: job.clipId, patch: { imageAssetId: asset.id } })
+    const project = getProject(job.projectId)
+    const first = clipsOf(job.projectId)[0]
+    if (!project.coverAssetId || first?.id === job.clipId) touchProject(job.projectId, { coverAssetId: asset.id })
+  } else if (target === 'clip-video' && job.clipId) {
+    const patch = { videoAssetId: asset.id, motionType: 'video' as const, mediaInMs: 0 }
+    patchClip(job.clipId, patch)
+    emit.clip({ clipId: job.clipId, patch })
+  }
+  touchProject(job.projectId)
+  return asset.id
+}
+
 async function finishHiggsfield(ctx: TaskCtx, job: Job, requestId: string, payload: HfPayload): Promise<string> {
   const isVideo = payload.target === 'clip-video'
   const result = await hf.waitForResult(
@@ -180,42 +240,57 @@ async function finishHiggsfield(ctx: TaskCtx, job: Job, requestId: string, paylo
   if (!url) throw new Error('Higgsfield selesai tanpa file hasil')
   ctx.progress(0.93, 'Mengunduh hasil')
   const { bytes, contentType } = await downloadTo(url, ctx.signal)
-  const rel = saveFile(job.projectId, isVideo ? 'videos' : 'images', extFromType(contentType, url, isVideo ? '.mp4' : '.png'), bytes)
-  const abs = assetAbsPath(job.projectId, rel)
-  const size = await probeSize(abs)
-  const durationMs = isVideo ? await probeDurationMs(abs).catch(() => null) : null
-  const asset = insertAsset({
-    projectId: job.projectId,
-    clipId: job.clipId,
-    characterId: job.characterId,
+  return storeMediaAsset({
+    job,
+    bytes,
+    ext: extFromType(contentType, url, isVideo ? '.mp4' : '.png'),
     kind: isVideo ? 'video' : 'image',
     provider: 'higgsfield',
     model: payload.model,
     prompt: payload.prompt,
     remoteId: requestId,
     remoteUrl: url,
-    localPath: rel,
-    durationMs,
-    width: size?.width ?? null,
-    height: size?.height ?? null
+    target: payload.target
   })
-  emit.asset(asset)
-  if (payload.target === 'sheet' && job.characterId) {
-    setCharacterSheet(job.characterId, asset.id)
-    emit.character({ characterId: job.characterId, patch: { sheetAssetId: asset.id } })
-  } else if (payload.target === 'clip-image' && job.clipId) {
-    patchClip(job.clipId, { imageAssetId: asset.id })
-    emit.clip({ clipId: job.clipId, patch: { imageAssetId: asset.id } })
-    const project = getProject(job.projectId)
-    const first = clipsOf(job.projectId)[0]
-    if (!project.coverAssetId || first?.id === job.clipId) touchProject(job.projectId, { coverAssetId: asset.id })
-  } else if (payload.target === 'clip-video' && job.clipId) {
-    const patch = { videoAssetId: asset.id, motionType: 'video' as const, mediaInMs: 0 }
-    patchClip(job.clipId, patch)
-    emit.clip({ clipId: job.clipId, patch })
+}
+
+function flowProgress(ctx: TaskCtx, what: string) {
+  return (status: FlowVideoStatus, progress: number, _elapsed: number): void => {
+    if (status === 'queued') ctx.progress(0.12, 'Mengantre di Flow')
+    else ctx.progress(0.15 + 0.75 * (progress / 100), what)
   }
-  touchProject(job.projectId)
-  return asset.id
+}
+
+/** The serve image endpoint is synchronous, so the bytes are already in hand. */
+async function finishFlowImage(ctx: TaskCtx, job: Job, bytes: Buffer, payload: HfPayload): Promise<string> {
+  void ctx
+  return storeMediaAsset({
+    job,
+    bytes,
+    ext: '.png',
+    kind: 'image',
+    provider: 'flow',
+    model: payload.model,
+    prompt: payload.prompt,
+    target: payload.target
+  })
+}
+
+async function finishFlowVideo(ctx: TaskCtx, job: Job, videoId: string, payload: HfPayload): Promise<string> {
+  await flowBridge.waitForVideo(videoId, flowProgress(ctx, 'Membuat video'), ctx.signal)
+  ctx.progress(0.93, 'Mengunduh hasil')
+  const bytes = await flowBridge.downloadVideo(videoId, ctx.signal)
+  return storeMediaAsset({
+    job,
+    bytes,
+    ext: '.mp4',
+    kind: 'video',
+    provider: 'flow',
+    model: payload.model,
+    prompt: payload.prompt,
+    remoteId: videoId,
+    target: payload.target
+  })
 }
 
 function startHiggsfield(job: Job, build: (ctx: TaskCtx) => Promise<{ endpoint: string; body: Record<string, unknown>; payload: HfPayload }>): Job {
@@ -241,7 +316,9 @@ export function generateClipImage(clipId: string): Job {
   const existing = activeJobFor({ clipId }, 'image')
   if (existing) return existing
   const clip = getClip(clipId)
-  const job = insertJob({ projectId: clip.projectId, clipId, kind: 'image', provider: 'higgsfield' })
+  const provider = mediaProvider(getProject(clip.projectId).imageModel)
+  const job = insertJob({ projectId: clip.projectId, clipId, kind: 'image', provider })
+  if (provider === 'flow') return startFlowImage(job)
   return startHiggsfield(job, async (ctx) => {
     const fresh = getClip(clipId)
     const project = getProject(fresh.projectId)
@@ -257,11 +334,54 @@ export function generateClipImage(clipId: string): Job {
   })
 }
 
+/** Clip image through the local Flow bridge (no character-sheet references over HTTP). */
+function startFlowImage(job: Job): Job {
+  emit.job(job)
+  return runJob(job, 'flow', async (ctx) => {
+    if (!job.clipId) throw new Error('Klip tidak ditemukan')
+    const clip = getClip(job.clipId)
+    const project = getProject(clip.projectId)
+    const model = getFlowImageModel(project.imageModel)
+    const chars = charactersOf(project.id).filter((c) => clip.characterIds.includes(c.id))
+    // The serve HTTP layer cannot take reference images, so identity is described in words only.
+    const prompt = clipPrompt(project, clip, chars, [], 4000)
+    ctx.progress(0.08, 'Mengirim ke Flow')
+    const bytes = await flowBridge.generateImage({
+      prompt,
+      model: model.gflowModel,
+      size: flowSize(project.aspectRatio, 'image'),
+      signal: ctx.signal
+    })
+    const payload: HfPayload = { target: 'clip-image', model: model.id, prompt }
+    updateJobPayload(job.id, payload)
+    return finishFlowImage(ctx, job, bytes, payload)
+  })
+}
+
 export function generateCharacterSheet(characterId: string): Job {
   const existing = activeJobFor({ characterId }, 'sheet')
   if (existing) return existing
   const c = getCharacter(characterId)
-  const job = insertJob({ projectId: c.projectId, characterId, kind: 'sheet', provider: 'higgsfield' })
+  const provider = mediaProvider(getProject(c.projectId).imageModel)
+  const job = insertJob({ projectId: c.projectId, characterId, kind: 'sheet', provider })
+  if (provider === 'flow') {
+    emit.job(job)
+    return runJob(job, 'flow', async (ctx) => {
+      const project = getProject(c.projectId)
+      const model = getFlowImageModel(project.imageModel)
+      const prompt = sheetPrompt(project, getCharacter(characterId))
+      ctx.progress(0.08, 'Mengirim ke Flow')
+      const bytes = await flowBridge.generateImage({
+        prompt,
+        model: model.gflowModel,
+        size: '16:9',
+        signal: ctx.signal
+      })
+      const payload: HfPayload = { target: 'sheet', model: model.id, prompt }
+      updateJobPayload(job.id, payload)
+      return finishFlowImage(ctx, job, bytes, payload)
+    })
+  }
   return startHiggsfield(job, async () => {
     const project = getProject(c.projectId)
     const model = getImageModel(project.imageModel)
@@ -279,7 +399,9 @@ export function generateClipVideo(clipId: string): Job {
   if (existing) return existing
   const clip = getClip(clipId)
   if (!clip.imageAssetId) throw new Error('Buat gambar klip ini dulu sebelum membuat video AI.')
-  const job = insertJob({ projectId: clip.projectId, clipId, kind: 'video', provider: 'higgsfield' })
+  const provider = mediaProvider(getProject(clip.projectId).videoModel)
+  const job = insertJob({ projectId: clip.projectId, clipId, kind: 'video', provider })
+  if (provider === 'flow') return startFlowVideo(job)
   return startHiggsfield(job, async (ctx) => {
     const fresh = getClip(clipId)
     const image = getAsset(fresh.imageAssetId)
@@ -298,6 +420,40 @@ export function generateClipVideo(clipId: string): Job {
       body: videoBody(model, prompt, url, fresh.durationMs / 1000, project.aspectRatio, project.videoResolution),
       payload: { target: 'clip-video', model: model.id, prompt }
     }
+  })
+}
+
+/** Clip video through the local Flow bridge: the clip image is uploaded as the first frame. */
+function startFlowVideo(job: Job): Job {
+  emit.job(job)
+  return runJob(job, 'flow', async (ctx) => {
+    if (!job.clipId) throw new Error('Klip tidak ditemukan')
+    const fresh = getClip(job.clipId)
+    const image = getAsset(fresh.imageAssetId)
+    if (!image) throw new Error('Gambar klip tidak ditemukan')
+    const project = getProject(fresh.projectId)
+    const model = getFlowVideoModel(project.videoModel)
+    const seconds = fitFlowDuration(model, fresh.durationMs / 1000)
+    const scene = splitAvoid(fresh.visualPrompt).scene.replace(/\.$/, '')
+    let prompt =
+      fresh.videoPrompt.trim() ||
+      `${scene}. Subtle natural motion of the characters and environment, the camera slowly pushes in. Keep the art style of the first frame.`
+    prompt = `Open on the exact scene of the first frame and keep its art style, characters and composition. ${prompt} ${NO_MUSIC}`
+    ctx.progress(0.05, 'Menyiapkan gambar awal')
+    const abs = assetAbsPath(image.projectId, image.localPath)
+    ctx.progress(0.08, 'Mengirim ke Flow')
+    const videoId = await flowBridge.submitVideo({
+      prompt,
+      model: model.gflowModel,
+      seconds,
+      size: flowSize(project.aspectRatio, 'video'),
+      imagePath: abs,
+      signal: ctx.signal
+    })
+    ctx.setRemote(videoId)
+    const payload: HfPayload = { target: 'clip-video', model: model.id, prompt }
+    updateJobPayload(job.id, payload)
+    return finishFlowVideo(ctx, job, videoId, payload)
   })
 }
 
@@ -357,11 +513,14 @@ export function generateClipTts(clipId: string): Job {
 export function generateMissingImages(projectId: string): Job[] {
   const jobs: Job[] = []
   const project = getProject(projectId)
-  const model = getImageModel(project.imageModel)
-  if (maxRefs(model) > 0) {
-    const needed = new Set(clipsOf(projectId).flatMap((c) => c.characterIds))
-    for (const c of charactersOf(projectId)) {
-      if (needed.has(c.id) && !c.sheetAssetId) jobs.push(generateCharacterSheet(c.id))
+  // Flow's serve HTTP layer cannot take character sheets as references, so sheets are skipped there.
+  if (!isFlowModel(project.imageModel)) {
+    const model = getImageModel(project.imageModel)
+    if (maxRefs(model) > 0) {
+      const needed = new Set(clipsOf(projectId).flatMap((c) => c.characterIds))
+      for (const c of charactersOf(projectId)) {
+        if (needed.has(c.id) && !c.sheetAssetId) jobs.push(generateCharacterSheet(c.id))
+      }
     }
   }
   for (const clip of clipsOf(projectId)) {
@@ -383,13 +542,17 @@ export function generateMissingTts(projectId: string): Job[] {
     .map((c) => generateClipTts(c.id))
 }
 
-/** After a restart, keep polling Higgsfield requests that were already submitted; fail the rest. */
+/** After a restart, keep polling remote requests that were already submitted; fail the rest. */
 export function resumeJobs(): void {
   for (const row of unfinishedJobs()) {
     const payload = JSON.parse(row.payload_json || '{}') as Partial<HfPayload>
     if (row.provider === 'higgsfield' && row.remote_id && payload.target) {
       const job = getJob(row.id)!
       runJob(job, 'higgsfield', (ctx) => finishHiggsfield(ctx, job, row.remote_id, payload as HfPayload))
+    } else if (row.provider === 'flow' && row.remote_id && payload.target === 'clip-video') {
+      // gflow-openai serve keeps video jobs in its own store, so polling can resume.
+      const job = getJob(row.id)!
+      runJob(job, 'flow', (ctx) => finishFlowVideo(ctx, job, row.remote_id, payload as HfPayload))
     } else {
       emit.job(updateJob(row.id, { status: 'failed', error: 'Terhenti karena aplikasi ditutup. Coba lagi.', message: null }))
     }
@@ -425,6 +588,8 @@ export async function estimateCredits(
   seconds = 5,
   resolution?: string | null
 ): Promise<CreditEstimate | null> {
+  // Flow draws from the Google AI subscription, not a per-request credit endpoint.
+  if (isFlowModel(modelId)) return null
   const model = kind === 'image' ? getImageModel(modelId) : getVideoModel(modelId)
   const body =
     kind === 'image'
